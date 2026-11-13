@@ -6,3 +6,5 @@ bin/
 *.test
 .env
 .env.*
+payment-ledger-api
+api

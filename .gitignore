@@ -9,4 +9,6 @@ bin/
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
+.idea/api
+payment-ledger-api
+api
