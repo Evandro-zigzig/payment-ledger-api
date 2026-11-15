@@ -1,0 +1,10 @@
+.git
+.gitignore
+README.md
+bin/
+*.exe
+*.test
+.env
+.env.*
+payment-ledger-api
+api
