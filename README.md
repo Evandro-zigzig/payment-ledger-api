@@ -9,7 +9,7 @@
 
 Em instituições financeiras que processam transferências instantâneas, falhas temporárias de rede ou desvios de tráfego entre regiões (*Disaster Recovery*) fazem com que os clientes reenviem a mesma requisição de pagamento (*retries*). Sem proteção adequada, o banco corre o risco de **debitar o cliente duas vezes** ou perder a rastreabilidade da transação durante o encerramento de contentores.
 
-Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcleo transacional em clusters **Amazon EKS** multi-região (`us-east-1` e `us-west-2`), garantindo integridade financeira absoluta.
+Este microsserviço foi desenvolvido em **Go (Golang)** para registar transferências de forma idempotente em clusters **Amazon EKS** multi-região (`us-east-1` e `us-west-2`). Atualmente, grava o registo da transferência no DynamoDB; não movimenta saldos nem executa débitos ou créditos.
 
 ---
 
@@ -17,7 +17,7 @@ Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcl
 
 | Pilar | Decisão Técnica | Justificação de Engenharia |
 | :--- | :--- | :--- |
-| **Integridade Financeira** | **Idempotência Atómica** (`attribute_not_exists`) | Utiliza expressões condicionais no Amazon DynamoDB para rejeitar (`409 Conflict`) qualquer tentativa duplicada de um mesmo `transaction_id`, impedindo cobranças duplicadas. |
+| **Idempotência do Registo** | **Escrita Condicional** (`attribute_not_exists`) | Utiliza uma expressão condicional no Amazon DynamoDB para rejeitar (`409 Conflict`) um segundo registo com o mesmo `transaction_id`. A API não executa débitos ou créditos. |
 | **Segurança de Contentor** | **Multi-Stage + Google Distroless (`nonroot`)** | A imagem final (~12 MB) não possui *shell* (`bash`/`sh`) nem gestores de pacotes (`apt`), e corre com utilizador sem privilégios (`UID 65532`), reduzindo a superfície de ataque a zero. |
 | **Alta Disponibilidade** | **Graceful Shutdown (`SIGTERM`)** | Interceta sinais de encerramento do Kubernetes e aguarda até 15 segundos para concluir transferências em andamento antes de fechar o servidor HTTP. |
 | **Failover Inteligente** | **Deep Health Check (`/healthz`)** | Valida em tempo real a conectividade com a tabela regional do DynamoDB. Caso a região degrade, retorna `503 Service Unavailable`, acionando o failover automático no Route 53. |
@@ -29,7 +29,7 @@ Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcl
 
 | Método | Endpoint | Descrição | Códigos HTTP |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/v1/transfers` | Liquida uma transferência financeira de forma idempotente. | `201 Created`, `409 Conflict` (Duplicado), `400 Bad Request` |
+| `POST` | `/v1/transfers` | Regista uma transferência de forma idempotente. | `201 Created`, `409 Conflict` (Duplicado), `400 Bad Request`, `413` (Pedido demasiado grande) |
 | `GET` | `/healthz` | Verifica a saúde da API e da base de dados na região local. | `200 OK`, `503 Service Unavailable` |
 | `GET` | `/metrics` | Expõe métricas de negócio e latência no formato Prometheus. | `200 OK` |
 
@@ -38,7 +38,7 @@ Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcl
 ## 4. Como Executar e Testar Localmente
 
 ### Pré-requisitos
-* Go `1.22+`
+* Go `1.23+` (versão mínima declarada em `go.mod`)
 * Docker (opcional, para validar o build seguro)
 * Credenciais AWS configuradas localmente (para acesso à tabela `banking-ledger-global`)
 
@@ -46,19 +46,24 @@ Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcl
 
 1. **Clonar o repositório e instalar dependências:**
    ```bash
-   git clone https://github.com
+   git clone https://github.com/Evandro-zigzig/payment-ledger-api.git
    cd payment-ledger-api
-   go mod tidy
+   go mod download
    ```
 
-2. **Iniciar a API localmente:**
+2. **Executar os testes unitários (não requerem credenciais AWS):**
+   ```bash
+   go test ./...
+   ```
+
+3. **Iniciar a API localmente:**
    ```bash
    export AWS_REGION=us-east-1
    export DYNAMODB_TABLE=banking-ledger-global
    go run ./cmd/api/main.go
    ```
 
-3. **Testar uma transferência e validar a idempotência:**
+4. **Testar um registo e validar a idempotência:**
    ```bash
    # Primeira chamada: Sucesso (201 Created)
    curl -i -X POST http://localhost:8080/v1/transfers \
@@ -71,7 +76,7 @@ Este microsserviço foi desenvolvido em **Go (Golang)** para operar como o núcl
      -d '{"transaction_id":"tx-9901","source_account":"ACC-100","target_account":"ACC-200","amount":250.00,"currency":"USD"}'
    ```
 
-4. **Construir a imagem Docker segura (Distroless):**
+5. **Construir a imagem Docker segura (Distroless):**
    ```bash
    docker build -t payment-ledger-api:v1.0.0 .
    ```
