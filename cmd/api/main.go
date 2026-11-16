@@ -1,17 +1,20 @@
 package main
 
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
-    "github.com/aws/aws-sdk-go-v2/aws"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -21,7 +24,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
 
 var (
 	transfersProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -61,10 +63,15 @@ type TransferRecord struct {
 }
 
 type App struct {
-	dbClient  *dynamodb.Client
+	dbClient  dynamoDBAPI
 	tableName string
 	region    string
 	logger    *slog.Logger
+}
+
+type dynamoDBAPI interface {
+	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
 }
 
 func main() {
@@ -132,12 +139,35 @@ func main() {
 func (a *App) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var req TransferRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			a.respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "pedido demasiado grande"})
+			return
+		}
 		a.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON invalido"})
 		return
 	}
 
-	if req.TransactionID == "" || req.Amount <= 0 || req.SourceAccount == "" || req.TargetAccount == "" {
+	var trailingData interface{}
+	if err := decoder.Decode(&trailingData); !errors.Is(err, io.EOF) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			a.respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "pedido demasiado grande"})
+			return
+		}
+		a.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "o pedido deve conter um unico objeto JSON"})
+		return
+	}
+
+	req.TransactionID = strings.TrimSpace(req.TransactionID)
+	req.SourceAccount = strings.TrimSpace(req.SourceAccount)
+	req.TargetAccount = strings.TrimSpace(req.TargetAccount)
+	req.Currency = strings.TrimSpace(req.Currency)
+	if req.TransactionID == "" || req.SourceAccount == "" || req.TargetAccount == "" ||
+		req.Amount <= 0 || math.IsNaN(req.Amount) || math.IsInf(req.Amount, 0) {
 		a.respondJSON(w, http.StatusBadRequest, map[string]string{"error": "campos obrigatorios em falta ou valor invalido"})
 		return
 	}
@@ -169,7 +199,6 @@ func (a *App) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		Item:                item,
 		ConditionExpression: aws.String("attribute_not_exists(TransactionID)"),
 	})
-
 	transferDuration.WithLabelValues(a.region).Observe(time.Since(start).Seconds())
 
 	if err != nil {

@@ -10,5 +10,5 @@ bin/
 Thumbs.db
 .vscode/
 .idea/
-payment-ledger-api
-api
+/payment-ledger-api
+/api
