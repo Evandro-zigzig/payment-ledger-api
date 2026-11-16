@@ -21,6 +21,10 @@ cmd/api/                 Arranque, configuração AWS e ciclo de vida do servido
 internal/httpapi/        Rotas HTTP, validação do JSON e códigos HTTP
 internal/ledger/         Modelo, regras, interface de persistência e adaptador DynamoDB
 api/openapi.yaml         Contrato público da API
+Dockerfile               Imagem multi-stage, compilada e executada sem root
+.dockerignore            Limita o contexto enviado ao Docker
+Makefile                 Comandos locais comuns de validação e build
+.github/workflows/ci.yml CI de pull requests e da branch main
 ```
 
 ### Impacto da separação
@@ -105,6 +109,74 @@ curl -i -X POST http://localhost:8080/v1/transfers \
 
 `go run` falha se `DYNAMODB_TABLE` não estiver definida ou se a configuração AWS não puder ser carregada. Não colocar chaves AWS no código nem em `.env` versionado. Em EKS, a identidade da aplicação será fornecida por IRSA; as permissões devem limitar-se a `dynamodb:TransactWriteItems` e `dynamodb:DescribeTable` sobre a tabela necessária.
 
+## Contentor local
+
+O `Dockerfile` transforma o código Go num binário estático numa fase de compilação e copia apenas esse binário e os certificados CA para uma imagem Distroless sem shell, executada como `nonroot`. Isto reduz o conteúdo da imagem final e evita executar a API como root. O `TARGETOS`/`TARGETARCH` permite ao BuildKit compilar para a plataforma alvo. As caches BuildKit aceleram compilações repetidas, sem fazer parte da imagem.
+
+O `.dockerignore` impede que o contexto inclua `.git`, credenciais em ficheiros `.env`, documentação, artefactos locais e o workflow. O código de `cmd/` e `internal/` continua incluído; não se usa um padrão genérico `api` que pudesse excluir código da aplicação.
+
+Em Linux ou WSL2, com Docker instalado e o daemon ativo:
+
+```bash
+docker build --tag novabanco-payment-api:local .
+docker image inspect --format '{{.Config.User}}' novabanco-payment-api:local
+```
+
+Resultado esperado: o build termina com sucesso e a inspeção indica `nonroot:nonroot`. Se o comando não ligar ao daemon, inicia o Docker Desktop/Engine e confirma `docker info`; se o build falhar a descarregar módulos, confirma o acesso à rede e repete para aproveitar a cache. O contentor da API não é um teste autónomo: exige `DYNAMODB_TABLE`, `WRITES_ENABLED`, configuração AWS e uma tabela compatível. Não iniciar uma API que escreva numa tabela partilhada sem confirmar previamente o ambiente e as contas de teste.
+
+## Comandos locais e validação contínua
+
+O `Makefile` evita que cada pessoa ou pipeline tenha de memorizar comandos diferentes:
+
+| Comando (Linux/WSL2) | O que verifica/faz | Resultado esperado; se falhar |
+|---|---|---|
+| `make fmt` | Aplica `gofmt` aos ficheiros Go em `cmd/` e `internal/`. | Não imprime ficheiros; rever o diff antes de continuar. |
+| `make fmt-check` | Verifica formatação sem modificar ficheiros. | Código de saída 0; se falhar, executar `make fmt` e rever o diff. |
+| `make test` | Executa `go test ./...`. | Todos os testes passam; investigar a primeira falha antes de alterar o teste. |
+| `make vet` | Executa `go vet ./...`. | Sem diagnósticos; corrigir a causa indicada pelo Go. |
+| `make build` | Compila `cmd/api` para `bin/payment-api`. | Ficheiro criado; se falhar, validar a versão Go e a mensagem de compilação. |
+| `make ci` | Executa formatação, testes, vet e compilação. | Código de saída 0; é o conjunto de verificações Go anterior à revisão/CI. |
+| `make docker-build` | Constrói a imagem local `novabanco-payment-api:local`. | Imagem criada; em caso de falha, verificar Docker/daemon e saída do build. |
+
+Requisitos locais: Go 1.23 ou superior, como declarado em `go.mod`, `make` e Docker Engine/Desktop para os alvos Docker. O Dockerfile e a CI usam Go 1.26.x; esta fase ainda não verificou a aplicação com o toolchain Go 1.23. Confirma a versão com `go version`, `make --version` e `docker version`. Os testes unitários não precisam de AWS; a execução da API ou testes de integração com DynamoDB precisam de configuração e recursos próprios.
+
+## CI: o que é verificado e o que fica fora
+
+O workflow `.github/workflows/ci.yml` corre em pull requests, em pushes para `main` e manualmente. Os passos são sequenciais: checkout; instalação da toolchain Go; verificação `gofmt`; `go vet`; testes; compilação; build da imagem; scan Trivy. A imagem é construída com `push: false` e carregada apenas no runner para ser analisada. **Esta fase não publica imagens, não assume uma role AWS e não tem permissões OIDC**; essas responsabilidades pertencem à fase A3.
+
+As Actions são fixadas a SHAs completos para evitar que uma tag móvel altere silenciosamente o código executado. Os comentários no workflow registam a versão de release associada ao SHA; confirma releases e compatibilidade na documentação oficial quando fizeres atualizações. O token do workflow tem apenas `contents: read`. O scan falha perante vulnerabilidades `HIGH` ou `CRITICAL`; não ignores uma descoberta sem análise, decisão documentada e prazo para remover a exceção.
+
+| Problema | Contributo desta CI | Prova ainda necessária |
+|---|---|---|
+| Falha regional | Compila e testa a lógica idempotente incluída no código. | Game Day ativo-passivo, RTO/RPO medidos e reconciliação no repositório de infraestrutura. |
+| Pedido repetido | Testes unitários verificam que o mesmo identificador não volta a debitar/creditar na região que já registou a operação. | Teste de retry durante failover e contagem de débitos duplicados com DynamoDB/ambiente de teste. |
+| Atualização durante pagamentos | Constrói a imagem com o binário que implementa encerramento gracioso e verifica vulnerabilidades da imagem. | Rolling update sob carga, medindo respostas não-2xx e pedidos perdidos; configuração Kubernetes pertence ao repo de infraestrutura. |
+
+### Escolha do serviço de CI e do registo
+
+GitHub Actions foi escolhido por o código estar no GitHub, por integrar verificações de pull request sem manter um servidor de CI e por permitir OIDC na fase de publicação. Jenkins é uma alternativa válida quando a organização já opera essa plataforma ou precisa de controlo próprio, mas exige manter controlador, agentes, atualizações e gestão de credenciais. Nesta fase a CI não usa AWS.
+
+ECR é a escolha prevista para produção por estar próximo dos workloads AWS e suportar a integração de identidade e a replicação planeada para DR. O destino ECR só será configurado na A3.
+
+| Registo | Vantagem | Custo/limitação a confirmar antes da decisão |
+|---|---|---|
+| Amazon ECR (escolhido) | Integração AWS e replicação entre regiões, alinhadas com EKS e DR. | Requer configuração AWS, IAM e atenção a armazenamento, transferência e retenção. |
+| GitHub Container Registry (GHCR) | Próximo do código e dos workflows GitHub; conveniente para projetos centrados em GitHub. | O acesso de workloads EKS e a estratégia de replicação precisam de ser desenhados. |
+| Docker Hub | Ecossistema amplo e simples para imagens públicas. | Limites de pull, funcionalidades e preços dependem do plano e podem mudar. |
+
+Confirma limites e preços nas páginas oficiais antes de ativar serviços pagos; não são estimados aqui. A imagem local construída nesta fase não é enviada para nenhum destes registos.
+
+### Documentação oficial
+
+- [Instalar Go](https://go.dev/doc/install)
+- [Builds multi-stage do Docker](https://docs.docker.com/build/building/multi-stage/)
+- [Cache de builds do Docker](https://docs.docker.com/build/cache/)
+- [GitHub Actions](https://docs.github.com/actions)
+- [Amazon ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html)
+- [GitHub Container Registry](https://docs.github.com/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+- [Docker Hub](https://docs.docker.com/docker-hub/)
+- [Trivy Action](https://github.com/aquasecurity/trivy-action)
+
 ## Limitações e próximos passos
 
 - Esta versão não autentica nem autoriza clientes. Não a exponhas à Internet nem a uses com contas reais.
@@ -112,3 +184,4 @@ curl -i -X POST http://localhost:8080/v1/transfers \
 - `/readyz` verifica acesso à tabela e se a região está autorizada a escrever; não prova por si só que todas as operações de negócio funcionarão. Usa `/livez` como liveness para não reiniciar contentores por uma falha temporária do DynamoDB.
 - A proteção idempotente é regional durante o período de replicação. O failover ativo-passivo, a reconciliação, o RTO/RPO e o rolling update ainda precisam de provas nos Game Days.
 - A aplicação e a infraestrutura vivem em repositórios distintos: este repositório contém código, contrato, testes e CI; Terraform, EKS, IAM, Global Tables, DNS e GitOps pertencem ao repositório de infraestrutura.
+- A CI atual valida código e imagem; ainda não publica artefactos, executa testes com DynamoDB, mede carga nem prova failover ou rolling update.
