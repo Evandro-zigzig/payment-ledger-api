@@ -1,9 +1,14 @@
 .git
+.github
 .gitignore
 README.md
-bin/
-*.exe
-*.test
+api/openapi.yaml
 .env
 .env.*
+bin/
+dist/
+*.exe
+*.test
+*.out
+*.prof
 /payment-ledger-api
