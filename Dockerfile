@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-s -w" \
     -o /bin/payment-api ./cmd/api/main.go
 
-FROM grc.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
