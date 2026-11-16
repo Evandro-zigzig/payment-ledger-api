@@ -1,0 +1,116 @@
+openapi: 3.0.3
+info:
+  title: NovaBanco Transfer API
+  version: 1.0.0
+  description: Transferências idempotentes em USD entre contas provisionadas.
+servers:
+  - url: http://localhost:8080
+paths:
+  /v1/transfers:
+    post:
+      summary: Criar uma transferência idempotente
+      operationId: createTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+      responses:
+        "201":
+          description: Transferência liquidada atomicamente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "400":
+          description: JSON ou campos da transferência inválidos.
+        "413":
+          description: O corpo do pedido excede o limite permitido.
+        "409":
+          description: O transaction_id já foi processado.
+        "422":
+          description: Saldo insuficiente ou condição da conta/moeda não satisfeita.
+        "503":
+          description: Escritas desativadas nesta região ou falha temporária do DynamoDB.
+  /livez:
+    get:
+      summary: Verificar se o processo está vivo
+      operationId: livenessCheck
+      responses:
+        "200":
+          description: O processo HTTP está ativo.
+  /readyz:
+    get:
+      summary: Verificar se a instância pode aceitar transferências
+      operationId: readinessCheck
+      responses:
+        "200":
+          description: A instância está ativa e a tabela DynamoDB está acessível.
+        "503":
+          description: A instância está em standby ou a tabela DynamoDB não está acessível.
+  /healthz:
+    get:
+      summary: Compatibilidade com o health check anterior
+      deprecated: true
+      operationId: legacyHealthCheck
+      responses:
+        "200":
+          description: A instância está pronta.
+        "503":
+          description: A instância não está pronta.
+  /metrics:
+    get:
+      summary: Métricas Prometheus
+      operationId: metrics
+      responses:
+        "200":
+          description: Métricas no formato de exposição Prometheus.
+components:
+  schemas:
+    TransferRequest:
+      type: object
+      required:
+        - transaction_id
+        - source_account
+        - target_account
+        - amount_minor
+        - currency
+      properties:
+        transaction_id:
+          type: string
+          minLength: 1
+          description: Chave de idempotência estável fornecida pelo cliente.
+        source_account:
+          type: string
+          minLength: 1
+        target_account:
+          type: string
+          minLength: 1
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Cêntimos de USD; por exemplo, USD 250,00 corresponde a 25000.
+        currency:
+          type: string
+          enum:
+            - USD
+    Transfer:
+      allOf:
+        - $ref: "#/components/schemas/TransferRequest"
+        - type: object
+          required:
+            - status
+            - processed_region
+            - created_at
+          properties:
+            status:
+              type: string
+              example: SETTLED
+            processed_region:
+              type: string
+              example: us-east-1
+            created_at:
+              type: string
+              format: date-time

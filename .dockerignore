@@ -7,4 +7,3 @@ bin/
 .env
 .env.*
 /payment-ledger-api
-/api
