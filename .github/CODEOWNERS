@@ -1,1 +1,15 @@
-/ .github/ @owner_evandro-infra
+* @evandro-infra
+ 
+/.github @evandro-infra
+
+/Dockerfile @evandro-infra
+
+/cmd/api/main.go @evandro-infra
+
+/internal/httpapi @evandro-infra
+
+/internal/ledger @evandro-infra
+
+/internal/* @evandro-infra
+
+.github/CODEOWNERS @evandro-infra
